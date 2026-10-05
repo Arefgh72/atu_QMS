@@ -13,6 +13,12 @@
  * wraps its input itself), so the WQMS wrapped in step 1 stays intact for the
  * explicit unwrap in step 3.
  *
+ * Gas: every transaction is sent with a 50% buffer over its estimate. The gas
+ * needed by the Qwap pair calls varies by ~10k between blocks (the pair updates
+ * different storage slots depending on its own per-block state), so a bare
+ * estimate taken at send time can be a few percent short by the time the block
+ * is produced; the first version of this script failed exactly that way.
+ *
  * Config via env:
  *   EVM_PRIVATE_KEY  (required)  private key of the EVM wallet, from repo secrets
  *   RPC_URL          default https://rpc.testnet.qms.finance
@@ -33,6 +39,7 @@ const RPC_URL = process.env.RPC_URL ?? 'https://rpc.testnet.qms.finance';
 const CHAIN_ID = 19480;
 const AMOUNT = process.env.AMOUNT_QMS ?? '0.001';
 const SLIPPAGE_BPS = BigInt(process.env.SLIPPAGE_BPS ?? '200'); // 2%
+const GAS_BUFFER_PCT = 50n; // +50% over the estimate
 const DRY_RUN = process.env.DRY_RUN === '1';
 
 // Qwap DEX on QMS Testnet (verified on testnet.qmsscan.io)
@@ -76,6 +83,18 @@ async function send(txPromise, label) {
   return { tx, receipt, gasWei };
 }
 
+/**
+ * Estimate gas for a contract method and send it with a buffer.
+ * `method` is the contract method object (e.g. router.swapExactETHForTokens),
+ * `args` its arguments, `overrides` the usual ethers overrides.
+ */
+async function sendBuffered(method, args, overrides, label) {
+  const estimate = await method.estimateGas(...args, overrides);
+  const gasLimit = estimate + (estimate * GAS_BUFFER_PCT) / 100n;
+  log(`${label}: gas estimate ${estimate}, sending with limit ${gasLimit}`);
+  return send(method(...args, { ...overrides, gasLimit }), label);
+}
+
 async function main() {
   const pk = (process.env.EVM_PRIVATE_KEY ?? process.env.PRIVATE_KEY ?? '').trim();
   if (!DRY_RUN && !/^0x[0-9a-fA-F]{64}$/.test(pk)) {
@@ -116,115 +135,129 @@ async function main() {
     }
   }
 
-  // ---- 1/4 wrap ----------------------------------------------------------
-  const wqmsBefore = await wqms.balanceOf(wallet.address);
-  let wrapRx = null;
-  if (!DRY_RUN) {
-    wrapRx = await send(wqms.deposit({ value: amount }), `1/4 wrap ${AMOUNT} QMS -> WQMS`);
-  }
-  const wrappedDelta = (await wqms.balanceOf(wallet.address)) - wqmsBefore;
-  log(`1/4 wrapped ${fmt(wrappedDelta)} WQMS`);
-
-  // ---- 2/4 random swap to USDT / USDC / WBTC (1/3 each) -------------------
-  const pick = randomInt(0, TOKENS.length);
-  const token = TOKENS[pick];
-  log(`2/4 random pick #${pick} of ${TOKENS.length} -> ${token.symbol}`);
-  const tokenContract = new ethers.Contract(token.address, ERC20_ABI, wallet);
-
-  const [quotedOut] = [
-    (await router.getAmountsOut(amount, [WQMS_ADDRESS, token.address]))[1],
-  ];
-  const minOut = (quotedOut * (10000n - SLIPPAGE_BPS)) / 10000n;
-  log(`2/4 quote: ${AMOUNT} QMS -> ${fmt(quotedOut, token.decimals)} ${token.symbol} (minOut ${fmt(minOut, token.decimals)})`);
-
-  const tokenBefore = await tokenContract.balanceOf(wallet.address);
-  let swapRx = null;
-  if (!DRY_RUN) {
-    swapRx = await send(
-      router.swapExactETHForTokens(minOut, [WQMS_ADDRESS, token.address], wallet.address, deadline(), {
-        value: amount,
-      }),
-      `2/4 swap ${AMOUNT} QMS -> ${token.symbol}`
-    );
-  }
-  const tokenReceived = (await tokenContract.balanceOf(wallet.address)) - tokenBefore;
-  log(`2/4 received ${fmt(tokenReceived, token.decimals)} ${token.symbol}`);
-
-  // ---- 3/4 unwrap the WQMS wrapped in step 1 ------------------------------
-  let unwrapRx = null;
-  if (!DRY_RUN) {
-    if (wrappedDelta > 0n) {
-      unwrapRx = await send(wqms.withdraw(wrappedDelta), `3/4 unwrap ${fmt(wrappedDelta)} WQMS -> QMS`);
-    } else {
-      log('3/4 nothing to unwrap (wrapped delta was zero)');
-    }
-  } else {
-    log(`3/4 would unwrap ${AMOUNT} WQMS -> QMS`);
-  }
-
-  // ---- 4/4 swap the received token back to QMS ----------------------------
-  let backRx = null;
-  let approveRx = null;
-  let nativeReturned = 0n;
-  let quotedBack = 0n;
-  if (!DRY_RUN) {
-    if (tokenReceived === 0n) {
-      throw new Error(`Swap produced 0 ${token.symbol}; aborting before step 4.`);
-    }
-    const allowance = await tokenContract.allowance(wallet.address, ROUTER_ADDRESS);
-    if (allowance < tokenReceived) {
-      approveRx = await send(tokenContract.approve(ROUTER_ADDRESS, ethers.MaxUint256), `4/4 approve ${token.symbol}`);
-    }
-    quotedBack = (await router.getAmountsOut(tokenReceived, [token.address, WQMS_ADDRESS]))[1];
-    const minBack = (quotedBack * (10000n - SLIPPAGE_BPS)) / 10000n;
-    const nativeBeforeBack = await provider.getBalance(wallet.address);
-    backRx = await send(
-      router.swapExactTokensForETH(
-        tokenReceived,
-        minBack,
-        [token.address, WQMS_ADDRESS],
-        wallet.address,
-        deadline()
-      ),
-      `4/4 swap ${fmt(tokenReceived, token.decimals)} ${token.symbol} -> QMS`
-    );
-    const nativeAfterBack = await provider.getBalance(wallet.address);
-    nativeReturned = nativeAfterBack - nativeBeforeBack + backRx.gasWei;
-    log(`4/4 returned ${ethers.formatEther(nativeReturned)} QMS for ${fmt(tokenReceived, token.decimals)} ${token.symbol}`);
-  } else {
-    log(`4/4 would swap the received ${token.symbol} back to QMS`);
-  }
-
-  const nativeAfter = await provider.getBalance(wallet.address);
-  const gasWei =
-    (wrapRx?.gasWei ?? 0n) + (swapRx?.gasWei ?? 0n) + (approveRx?.gasWei ?? 0n) + (unwrapRx?.gasWei ?? 0n) + (backRx?.gasWei ?? 0n);
-
+  // everything worth recording, even if a later step fails
   const entry = {
     timestamp: new Date().toISOString(),
     status: 'ok',
     wallet: wallet.address,
     chainId: CHAIN_ID,
     amountQms: AMOUNT,
-    // step 2 outcome: which token and exactly how much of it was received
-    chosenToken: token.symbol,
-    chosenTokenAddress: token.address,
-    tokenDecimals: token.decimals,
-    tokenAmountReceived: fmt(tokenReceived, token.decimals),
-    tokenAmountReceivedRaw: tokenReceived.toString(),
-    quotedTokenOut: fmt(quotedOut, token.decimals),
-    quotedBackQms: fmt(quotedBack),
-    nativeReturnedQms: ethers.formatEther(nativeReturned),
     nativeBalanceBefore: ethers.formatEther(nativeBefore),
-    nativeBalanceAfter: ethers.formatEther(nativeAfter),
-    gasCostQms: ethers.formatEther(gasWei),
-    txHashes: {
-      wrap: wrapRx?.tx.hash ?? null,
-      swap: swapRx?.tx.hash ?? null,
-      unwrap: unwrapRx?.tx.hash ?? null,
-      approve: approveRx?.tx.hash ?? null,
-      swapBack: backRx?.tx.hash ?? null,
-    },
+    // step 2 outcome: which token and exactly how much of it was received
+    chosenToken: null,
+    chosenTokenAddress: null,
+    tokenDecimals: null,
+    tokenAmountReceived: null,
+    tokenAmountReceivedRaw: null,
+    quotedTokenOut: null,
+    quotedBackQms: null,
+    nativeReturnedQms: null,
+    nativeBalanceAfter: null,
+    gasCostQms: null,
+    txHashes: { wrap: null, swap: null, unwrap: null, approve: null, swapBack: null },
   };
+  let gasWei = 0n;
+  const note = (key, value) => {
+    entry[key] = value;
+  };
+
+  try {
+    // ---- 1/4 wrap ----------------------------------------------------------
+    const wqmsBefore = await wqms.balanceOf(wallet.address);
+    if (!DRY_RUN) {
+      const r = await sendBuffered(wqms.deposit, [], { value: amount }, `1/4 wrap ${AMOUNT} QMS -> WQMS`);
+      gasWei += r.gasWei;
+      entry.txHashes.wrap = r.tx.hash;
+    }
+    const wrappedDelta = (await wqms.balanceOf(wallet.address)) - wqmsBefore;
+    log(`1/4 wrapped ${fmt(wrappedDelta)} WQMS`);
+
+    // ---- 2/4 random swap to USDT / USDC / WBTC (1/3 each) -------------------
+    const pick = randomInt(0, TOKENS.length);
+    const token = TOKENS[pick];
+    log(`2/4 random pick #${pick} of ${TOKENS.length} -> ${token.symbol}`);
+    const tokenContract = new ethers.Contract(token.address, ERC20_ABI, wallet);
+    note('chosenToken', token.symbol);
+    note('chosenTokenAddress', token.address);
+    note('tokenDecimals', token.decimals);
+
+    const quotedOut = (await router.getAmountsOut(amount, [WQMS_ADDRESS, token.address]))[1];
+    const minOut = (quotedOut * (10000n - SLIPPAGE_BPS)) / 10000n;
+    note('quotedTokenOut', fmt(quotedOut, token.decimals));
+    log(`2/4 quote: ${AMOUNT} QMS -> ${fmt(quotedOut, token.decimals)} ${token.symbol} (minOut ${fmt(minOut, token.decimals)})`);
+
+    const tokenBefore = await tokenContract.balanceOf(wallet.address);
+    if (!DRY_RUN) {
+      const r = await sendBuffered(
+        router.swapExactETHForTokens,
+        [minOut, [WQMS_ADDRESS, token.address], wallet.address, deadline()],
+        { value: amount },
+        `2/4 swap ${AMOUNT} QMS -> ${token.symbol}`
+      );
+      gasWei += r.gasWei;
+      entry.txHashes.swap = r.tx.hash;
+    }
+    const tokenReceived = (await tokenContract.balanceOf(wallet.address)) - tokenBefore;
+    note('tokenAmountReceived', fmt(tokenReceived, token.decimals));
+    note('tokenAmountReceivedRaw', tokenReceived.toString());
+    log(`2/4 received ${fmt(tokenReceived, token.decimals)} ${token.symbol}`);
+
+    // ---- 3/4 unwrap the WQMS wrapped in step 1 ------------------------------
+    if (!DRY_RUN) {
+      if (wrappedDelta > 0n) {
+        const r = await sendBuffered(wqms.withdraw, [wrappedDelta], {}, `3/4 unwrap ${fmt(wrappedDelta)} WQMS -> QMS`);
+        gasWei += r.gasWei;
+        entry.txHashes.unwrap = r.tx.hash;
+      } else {
+        log('3/4 nothing to unwrap (wrapped delta was zero)');
+      }
+    } else {
+      log(`3/4 would unwrap ${AMOUNT} WQMS -> QMS`);
+    }
+
+    // ---- 4/4 swap the received token back to QMS ----------------------------
+    if (!DRY_RUN) {
+      if (tokenReceived === 0n) {
+        throw new Error(`Swap produced 0 ${token.symbol}; aborting before step 4.`);
+      }
+      const allowance = await tokenContract.allowance(wallet.address, ROUTER_ADDRESS);
+      if (allowance < tokenReceived) {
+        const r = await sendBuffered(
+          tokenContract.approve,
+          [ROUTER_ADDRESS, ethers.MaxUint256],
+          {},
+          `4/4 approve ${token.symbol}`
+        );
+        gasWei += r.gasWei;
+        entry.txHashes.approve = r.tx.hash;
+      }
+      const quotedBack = (await router.getAmountsOut(tokenReceived, [token.address, WQMS_ADDRESS]))[1];
+      const minBack = (quotedBack * (10000n - SLIPPAGE_BPS)) / 10000n;
+      note('quotedBackQms', fmt(quotedBack));
+      const nativeBeforeBack = await provider.getBalance(wallet.address);
+      const r = await sendBuffered(
+        router.swapExactTokensForETH,
+        [tokenReceived, minBack, [token.address, WQMS_ADDRESS], wallet.address, deadline()],
+        {},
+        `4/4 swap ${fmt(tokenReceived, token.decimals)} ${token.symbol} -> QMS`
+      );
+      gasWei += r.gasWei;
+      entry.txHashes.swapBack = r.tx.hash;
+      const nativeAfterBack = await provider.getBalance(wallet.address);
+      const nativeReturned = nativeAfterBack - nativeBeforeBack + r.gasWei;
+      note('nativeReturnedQms', ethers.formatEther(nativeReturned));
+      log(`4/4 returned ${ethers.formatEther(nativeReturned)} QMS for ${fmt(tokenReceived, token.decimals)} ${token.symbol}`);
+    } else {
+      log(`4/4 would swap the received ${token.symbol} back to QMS`);
+    }
+  } catch (err) {
+    entry.status = 'error';
+    entry.error = err?.shortMessage ?? err?.message ?? String(err);
+  }
+
+  const nativeAfter = await provider.getBalance(wallet.address);
+  note('nativeBalanceAfter', ethers.formatEther(nativeAfter));
+  note('gasCostQms', ethers.formatEther(gasWei));
 
   if (!DRY_RUN) {
     mkdirSync(LOG_DIR, { recursive: true });
@@ -233,8 +266,9 @@ async function main() {
     log('log written to logs/swap-cycles.jsonl');
   }
 
-  log('cycle completed:');
+  log(`cycle finished with status: ${entry.status}`);
   console.log(JSON.stringify(entry, null, 2));
+  if (entry.status !== 'ok') process.exitCode = 1;
 }
 
 main().catch((err) => {
