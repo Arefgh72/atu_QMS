@@ -1,0 +1,17 @@
+{
+  "name": "atu-qms-swap-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "QMS Testnet cycle every 12h: wrap QMS, random swap to USDT/USDC/WBTC, unwrap, swap back (GitHub Action)",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "cycle": "node scripts/qms-swap-cycle.mjs",
+    "dry-run": "node scripts/qms-swap-cycle.mjs"
+  },
+  "dependencies": {
+    "ethers": "^6.17.0"
+  }
+}
