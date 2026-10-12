@@ -1,25 +1,25 @@
 {
-  "timestamp": "2026-10-11T17:26:18.655Z",
+  "timestamp": "2026-10-12T04:42:46.779Z",
   "status": "ok",
   "wallet": "0xFDA1d6115A49adf731570800D35C901ad4e0057B",
   "chainId": 19480,
   "amountQms": "0.001",
-  "nativeBalanceBefore": "16.747838612924763547",
-  "chosenToken": "USDC",
-  "chosenTokenAddress": "0xDfF68E53a0A8275212927c12017f5aB5f1842a04",
+  "nativeBalanceBefore": "16.747832590571250416",
+  "chosenToken": "USDT",
+  "chosenTokenAddress": "0x72577544f4134a25E7f09d0B5FF0ca05A1249EbF",
   "tokenDecimals": 6,
   "tokenAmountReceived": "0.000549",
   "tokenAmountReceivedRaw": "549",
   "quotedTokenOut": "0.000549",
-  "quotedBackQms": "0.000993977405916983",
-  "nativeReturnedQms": "0.000993977682283171",
-  "nativeBalanceAfter": "16.747832590571250416",
-  "gasCostQms": "0.000000000035796302",
+  "quotedBackQms": "0.000993611242478071",
+  "nativeReturnedQms": "0.000993610733660226",
+  "nativeBalanceAfter": "16.747826201271152152",
+  "gasCostQms": "0.00000000003375849",
   "txHashes": {
-    "wrap": "0x75833a15968de629fe40aab6f8ffabf43dc46fe1c016720e5caed7df483e2bdf",
-    "swap": "0x4b873fc40c659c9ad96538db7cdd894c48d85dcc83381e16b269d62d13c3ec91",
-    "unwrap": "0xa71eb969e6a560cee5736f078b27d353324efe94b80626fc5a0b1b031bd5c59c",
+    "wrap": "0x092cbcf7202841d707707ce23ad5794913a15698408634e56c144592febfec70",
+    "swap": "0x8e25ff6b2e8353a5cc6a602ead17db1172c0072e4c9c563a571a1741e0a5e4c9",
+    "unwrap": "0xa5d1fe91907340004cf732b403bd6b2eb2a6b03e4885813cba03caffd7ef860e",
     "approve": null,
-    "swapBack": "0x282b96fc7ab68b729d64da6f4cb531be9533719c3c93a0f0333dff6453c6b645"
+    "swapBack": "0xd63af65eb2f69718e240a4da8a077699f4fc0dd4fd71f338d891e0b83b86e1d6"
   }
 }
