@@ -1,29 +1,37 @@
 /**
- * QMS Testnet swap cycle — runs every 12 hours from GitHub Actions.
+ * QMS Testnet liquidity cycle — runs every 12 hours from GitHub Actions.
  *
  * One cycle:
  *   1) wrap   : 0.001 QMS (native) -> 0.001 WQMS              [WQMS.deposit]
  *   2) swap   : 0.001 QMS -> one of USDT / USDC / WBTC,       [router.swapExactETHForTokens]
  *               picked uniformly at random (1/3 each)
  *   3) unwrap : the WQMS wrapped in step 1 -> QMS             [WQMS.withdraw]
- *   4) swap   : the token received in step 2 -> QMS           [router.swapExactTokensForETH]
- *               the token symbol and the amount received are recorded in logs/swap-cycles.jsonl
+ *   4) final action (FINAL_ACTION, default addLiquidity):
+ *        addLiquidity: the received token + ~0.001 QMS are added to the
+ *                      token/WQMS pair; the LP tokens go to the wallet.
+ *                      [router.addLiquidityETH]
+ *        swapBack   : the received token is swapped back to native QMS.
+ *                      [router.swapExactTokensForETH]
  *
- * Note on steps 1-3: step 2 feeds the router from the native balance (the router
- * wraps its input itself), so the WQMS wrapped in step 1 stays intact for the
- * explicit unwrap in step 3.
+ * The token symbol, the exact amount received in step 2 and the outcome of
+ * step 4 are recorded in logs/swap-cycles.jsonl.
+ *
+ * Note on steps 1-3: step 2 feeds the router from the native balance (the
+ * router wraps its input itself), so the WQMS wrapped in step 1 stays intact
+ * for the explicit unwrap in step 3.
  *
  * Gas: every transaction is sent with a 50% buffer over its estimate. The gas
  * needed by the Qwap pair calls varies by ~10k between blocks (the pair updates
  * different storage slots depending on its own per-block state), so a bare
  * estimate taken at send time can be a few percent short by the time the block
- * is produced; the first version of this script failed exactly that way.
+ * is produced; an earlier version failed exactly that way.
  *
  * Config via env:
  *   EVM_PRIVATE_KEY  (required)  private key of the EVM wallet, from repo secrets
  *   RPC_URL          default https://rpc.testnet.qms.finance
  *   AMOUNT_QMS       default 0.001
  *   SLIPPAGE_BPS     default 200 (2%)
+ *   FINAL_ACTION     default addLiquidity; set "swapBack" for the old behavior
  *   DRY_RUN=1        read-only: checks + quotes, sends nothing, writes no log
  */
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -41,6 +49,7 @@ const AMOUNT = process.env.AMOUNT_QMS ?? '0.001';
 const SLIPPAGE_BPS = BigInt(process.env.SLIPPAGE_BPS ?? '200'); // 2%
 const GAS_BUFFER_PCT = 50n; // +50% over the estimate
 const DRY_RUN = process.env.DRY_RUN === '1';
+const FINAL_ACTION = (process.env.FINAL_ACTION ?? 'addLiquidity').toLowerCase();
 
 // Qwap DEX on QMS Testnet (verified on testnet.qmsscan.io)
 const ROUTER_ADDRESS = '0x93AFF45f28e5DF1b55f5AEFEfB807De843b12619';
@@ -65,9 +74,17 @@ const WQMS_ABI = [
 ];
 const ROUTER_ABI = [
   'function WQMS() view returns (address)',
+  'function factory() view returns (address)',
   'function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[] amounts)',
   'function swapExactETHForTokens(uint256 amountOutMin, address[] path, address to, uint256 deadline) payable returns (uint256[] amounts)',
   'function swapExactTokensForETH(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline) returns (uint256[] amounts)',
+  'function addLiquidityETH(address token, uint256 amountTokenDesired, uint256 amountTokenMin, uint256 amountETHMin, address to, uint256 deadline) payable returns (uint256 amountToken, uint256 amountETH, uint256 liquidity)',
+];
+const FACTORY_ABI = ['function getPair(address tokenA, address tokenB) view returns (address pair)'];
+const PAIR_ABI = [
+  'function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)',
+  'function token0() view returns (address)',
+  'function balanceOf(address owner) view returns (uint256)',
 ];
 
 const fmt = (v, d = 18) => ethers.formatUnits(v, d);
@@ -96,6 +113,10 @@ async function sendBuffered(method, args, overrides, label) {
 }
 
 async function main() {
+  if (!['addliquidity', 'swapback'].includes(FINAL_ACTION)) {
+    throw new Error(`FINAL_ACTION must be "addLiquidity" or "swapBack", got "${FINAL_ACTION}"`);
+  }
+
   const pk = (process.env.EVM_PRIVATE_KEY ?? process.env.PRIVATE_KEY ?? '').trim();
   if (!DRY_RUN && !/^0x[0-9a-fA-F]{64}$/.test(pk)) {
     throw new Error(
@@ -112,6 +133,7 @@ async function main() {
   const wallet = new ethers.Wallet(pk || ethers.Wallet.createRandom().privateKey, provider);
   const router = new ethers.Contract(ROUTER_ADDRESS, ROUTER_ABI, wallet);
   const wqms = new ethers.Contract(WQMS_ADDRESS, WQMS_ABI, wallet);
+  const factory = new ethers.Contract(await router.factory(), FACTORY_ABI, wallet);
   const amount = ethers.parseEther(AMOUNT);
 
   const routerWqms = await router.WQMS();
@@ -119,7 +141,10 @@ async function main() {
     throw new Error(`Router WQMS (${routerWqms}) does not match expected ${WQMS_ADDRESS}`);
   }
 
-  log(`wallet ${wallet.address} | chain ${network.chainId} | amount ${AMOUNT} QMS | dryRun ${DRY_RUN}`);
+  log(
+    `wallet ${wallet.address} | chain ${network.chainId} | amount ${AMOUNT} QMS ` +
+      `| final ${FINAL_ACTION} | dryRun ${DRY_RUN}`
+  );
 
   const nativeBefore = await provider.getBalance(wallet.address);
   if (!DRY_RUN) {
@@ -142,6 +167,7 @@ async function main() {
     wallet: wallet.address,
     chainId: CHAIN_ID,
     amountQms: AMOUNT,
+    finalAction: FINAL_ACTION === 'addliquidity' ? 'addLiquidity' : 'swapBack',
     nativeBalanceBefore: ethers.formatEther(nativeBefore),
     // step 2 outcome: which token and exactly how much of it was received
     chosenToken: null,
@@ -150,11 +176,16 @@ async function main() {
     tokenAmountReceived: null,
     tokenAmountReceivedRaw: null,
     quotedTokenOut: null,
+    // step 4 outcome
     quotedBackQms: null,
     nativeReturnedQms: null,
+    tokenUsedForLiquidity: null,
+    nativeUsedForLiquidityQms: null,
+    lpTokenAddress: null,
+    lpAmountReceived: null,
     nativeBalanceAfter: null,
     gasCostQms: null,
-    txHashes: { wrap: null, swap: null, unwrap: null, approve: null, swapBack: null },
+    txHashes: { wrap: null, swap: null, unwrap: null, approve: null, finalAction: null },
   };
   let gasWei = 0n;
   const note = (key, value) => {
@@ -215,11 +246,12 @@ async function main() {
       log(`3/4 would unwrap ${AMOUNT} WQMS -> QMS`);
     }
 
-    // ---- 4/4 swap the received token back to QMS ----------------------------
+    // ---- 4/4 final action: add liquidity or swap back -----------------------
     if (!DRY_RUN) {
       if (tokenReceived === 0n) {
         throw new Error(`Swap produced 0 ${token.symbol}; aborting before step 4.`);
       }
+
       const allowance = await tokenContract.allowance(wallet.address, ROUTER_ADDRESS);
       if (allowance < tokenReceived) {
         const r = await sendBuffered(
@@ -231,24 +263,80 @@ async function main() {
         gasWei += r.gasWei;
         entry.txHashes.approve = r.tx.hash;
       }
-      const quotedBack = (await router.getAmountsOut(tokenReceived, [token.address, WQMS_ADDRESS]))[1];
-      const minBack = (quotedBack * (10000n - SLIPPAGE_BPS)) / 10000n;
-      note('quotedBackQms', fmt(quotedBack));
-      const nativeBeforeBack = await provider.getBalance(wallet.address);
-      const r = await sendBuffered(
-        router.swapExactTokensForETH,
-        [tokenReceived, minBack, [token.address, WQMS_ADDRESS], wallet.address, deadline()],
-        {},
-        `4/4 swap ${fmt(tokenReceived, token.decimals)} ${token.symbol} -> QMS`
-      );
-      gasWei += r.gasWei;
-      entry.txHashes.swapBack = r.tx.hash;
-      const nativeAfterBack = await provider.getBalance(wallet.address);
-      const nativeReturned = nativeAfterBack - nativeBeforeBack + r.gasWei;
-      note('nativeReturnedQms', ethers.formatEther(nativeReturned));
-      log(`4/4 returned ${ethers.formatEther(nativeReturned)} QMS for ${fmt(tokenReceived, token.decimals)} ${token.symbol}`);
+
+      if (FINAL_ACTION === 'addliquidity') {
+        // Provide the received token plus the native leg at the pair's current
+        // ratio. getPair is order-independent; the reserves are sorted by token0.
+        const pairAddress = await factory.getPair(WQMS_ADDRESS, token.address);
+        if (pairAddress === ethers.ZeroAddress) {
+          throw new Error(`No ${token.symbol}/WQMS pair on the factory`);
+        }
+        const pair = new ethers.Contract(pairAddress, PAIR_ABI, wallet);
+        const [r0, r1] = await pair.getReserves();
+        const token0 = await pair.token0();
+        const wqmsIsToken0 = token0.toLowerCase() === WQMS_ADDRESS.toLowerCase();
+        const reserveWqms = wqmsIsToken0 ? r0 : r1;
+        const reserveToken = wqmsIsToken0 ? r1 : r0;
+        if (reserveToken === 0n) {
+          throw new Error(`Pair ${pairAddress} has no ${token.symbol} reserves`);
+        }
+
+        // Same ratio rule the router applies: quote(amountToken, reserveToken, reserveWqms)
+        const nativeNeeded = (tokenReceived * reserveWqms) / reserveToken;
+        // Slight over-approval; the router refunds any excess ETH.
+        const nativeValue = (nativeNeeded * 10050n) / 10000n;
+        const amountTokenMin = (tokenReceived * (10000n - SLIPPAGE_BPS)) / 10000n;
+        const amountEthMin = (nativeNeeded * (10000n - SLIPPAGE_BPS)) / 10000n;
+        log(
+          `4/4 add liquidity: ${fmt(tokenReceived, token.decimals)} ${token.symbol} + ` +
+            `~${ethers.formatEther(nativeNeeded)} QMS (sending ${ethers.formatEther(nativeValue)} QMS)`
+        );
+
+        const lpBefore = await pair.balanceOf(wallet.address);
+        const tokenBeforeLp = await tokenContract.balanceOf(wallet.address);
+        const nativeBeforeLp = await provider.getBalance(wallet.address);
+        const r = await sendBuffered(
+          router.addLiquidityETH,
+          [token.address, tokenReceived, amountTokenMin, amountEthMin, wallet.address, deadline()],
+          { value: nativeValue },
+          `4/4 add liquidity ${fmt(tokenReceived, token.decimals)} ${token.symbol} + QMS`
+        );
+        gasWei += r.gasWei;
+        entry.txHashes.finalAction = r.tx.hash;
+
+        const lpAfter = await pair.balanceOf(wallet.address);
+        const tokenAfterLp = await tokenContract.balanceOf(wallet.address);
+        const nativeAfterLp = await provider.getBalance(wallet.address);
+        const tokenUsed = tokenBeforeLp - tokenAfterLp;
+        const nativeUsed = nativeBeforeLp - nativeAfterLp - r.gasWei;
+        note('lpTokenAddress', pairAddress);
+        note('lpAmountReceived', ethers.formatEther(lpAfter - lpBefore));
+        note('tokenUsedForLiquidity', fmt(tokenUsed, token.decimals));
+        note('nativeUsedForLiquidityQms', ethers.formatEther(nativeUsed));
+        log(
+          `4/4 added ${fmt(tokenUsed, token.decimals)} ${token.symbol} + ${ethers.formatEther(nativeUsed)} QMS; ` +
+            `received ${ethers.formatEther(lpAfter - lpBefore)} LP tokens`
+        );
+      } else {
+        const quotedBack = (await router.getAmountsOut(tokenReceived, [token.address, WQMS_ADDRESS]))[1];
+        const minBack = (quotedBack * (10000n - SLIPPAGE_BPS)) / 10000n;
+        note('quotedBackQms', fmt(quotedBack));
+        const nativeBeforeBack = await provider.getBalance(wallet.address);
+        const r = await sendBuffered(
+          router.swapExactTokensForETH,
+          [tokenReceived, minBack, [token.address, WQMS_ADDRESS], wallet.address, deadline()],
+          {},
+          `4/4 swap ${fmt(tokenReceived, token.decimals)} ${token.symbol} -> QMS`
+        );
+        gasWei += r.gasWei;
+        entry.txHashes.finalAction = r.tx.hash;
+        const nativeAfterBack = await provider.getBalance(wallet.address);
+        const nativeReturned = nativeAfterBack - nativeBeforeBack + r.gasWei;
+        note('nativeReturnedQms', ethers.formatEther(nativeReturned));
+        log(`4/4 returned ${ethers.formatEther(nativeReturned)} QMS for ${fmt(tokenReceived, token.decimals)} ${token.symbol}`);
+      }
     } else {
-      log(`4/4 would swap the received ${token.symbol} back to QMS`);
+      log(`4/4 would ${FINAL_ACTION === 'addliquidity' ? 'add liquidity with' : 'swap back'} the received ${token.symbol}`);
     }
   } catch (err) {
     entry.status = 'error';
