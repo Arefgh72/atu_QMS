@@ -3,7 +3,7 @@ name: QMS Swap Cycle
 on:
   schedule:
     # every 12 hours: 00:00 and 12:00 UTC
-    - cron: "0 */08 * * *"
+    - cron: "0 */05 * * *"
   workflow_dispatch:
     inputs:
       amount_qms:
