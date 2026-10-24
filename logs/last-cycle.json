@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-10-24T09:20:00.188Z",
+  "timestamp": "2026-10-24T13:52:16.560Z",
   "status": "ok",
   "wallet": "0xFDA1d6115A49adf731570800D35C901ad4e0057B",
   "chainId": 19480,
   "amountQms": "0.001",
   "finalAction": "addLiquidity",
-  "nativeBalanceBefore": "26.141308071106253495",
+  "nativeBalanceBefore": "26.139318263211467313",
   "chosenToken": "WBTC",
   "chosenTokenAddress": "0xD0d47E0BFFfdF57d79DC42B03a0aF31e608EF2c6",
   "tokenDecimals": 8,
@@ -15,16 +15,16 @@
   "quotedBackQms": null,
   "nativeReturnedQms": null,
   "tokenUsedForLiquidity": "0.00000048",
-  "nativeUsedForLiquidityQms": "0.000989756976109944",
+  "nativeUsedForLiquidityQms": "0.000997039737921759",
   "lpTokenAddress": "0x07932dbD779BeaF25fdB72E5cE1E5dC380c28f2a",
-  "lpAmountReceived": "0.000000000211342406",
-  "nativeBalanceAfter": "26.139318263211467313",
-  "gasCostQms": "0.000000050918676238",
+  "lpAmountReceived": "0.000000000212112474",
+  "nativeBalanceAfter": "26.124234765713305497",
+  "gasCostQms": "0.013086457760240057",
   "txHashes": {
-    "wrap": "0x985d00560ea0655eb9dc71f1268f7c88a412e6c7ea075d7cf1e9d6a8d2a96873",
-    "swap": "0x736e1502db3b04185de5c3d9425add292ceb7bdbd709bf85ba88b6a2b321b9e2",
-    "unwrap": "0xd532b966e90c10bb69ed8096de3097984bda61709631fcccb4bde1ffb3f0ef91",
+    "wrap": "0x7b37c5d392885bcbecc993e3a7ebf8bc76d1fcfda99b2ede7a89c214f1939378",
+    "swap": "0x2209d8ee1741a4ecc4501ffea86bb85968bc26d475e91963e9ece1e3d9deb22e",
+    "unwrap": "0x9fe061ea23704f7d3c4cb94b56bf6c87705e70ed4713423713980e49132ce66b",
     "approve": null,
-    "finalAction": "0x1c30e5183f48208248c3e18017b182b27ee22a8a39609afa9579b9c633ab1f44"
+    "finalAction": "0x618a9d1c75eb6232a58a2bebe9eacd6955ea697b182f7197ae12188c50b39631"
   }
 }
